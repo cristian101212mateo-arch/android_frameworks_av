@@ -1914,8 +1914,25 @@ status_t AudioSystem::listAudioPorts(audio_port_role_t role,
             aps->listAudioPorts(roleAidl, typeAidl, &numPortsAidl, &portsAidl, &generationAidl)));
     *num_ports = VALUE_OR_RETURN_STATUS(convertIntegral<unsigned int>(numPortsAidl.value));
     *generation = VALUE_OR_RETURN_STATUS(convertIntegral<unsigned int>(generationAidl));
-    RETURN_STATUS_IF_ERROR(convertRange(portsAidl.begin(), portsAidl.end(), ports,
-                                        aidl2legacy_AudioPortFw_audio_port_v7));
+
+    // PATCH A55X FREE SAM: Skip unsupported audio port types instead of failing entire list
+    unsigned int validCount = 0;
+    for (const auto& portAidl : portsAidl) {
+        if (validCount >= *num_ports) break;
+        
+        struct audio_port_v7 legacyPort;
+        status_t conversionStatus = aidl2legacy_AudioPortFw_audio_port_v7(portAidl, &legacyPort);
+        
+        if (conversionStatus == OK) {
+            ports[validCount] = legacyPort;
+            validCount++;
+        } else {
+            ALOGW("listAudioPorts: Skipping unsupported audio port type %d", 
+                  static_cast<int>(portAidl.device.type));
+        }
+    }
+    *num_ports = validCount;
+    
     return OK;
 }
 
