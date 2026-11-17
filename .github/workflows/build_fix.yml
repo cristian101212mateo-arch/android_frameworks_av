@@ -3,7 +3,7 @@ name: Build Patched Libaudioclient for A55X
 on:
   push:
     branches: [ lineage-23.2 ]
-  workflow_dispatch: # Permite ejecutarlo manualmente desde la web
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,8 +23,8 @@ jobs:
           libncurses5-dev libssl-dev lzop pngcrush schedtool squashfs-tools \
           rsync unzip zip openjdk-17-jdk ccache
         
-        git config --global user.email "cristian101212mateo@gmail.com"
-        git config --global user.name "cristian101212mateo-arch"
+        git config --global user.email "ci@a55x.build"
+        git config --global user.name "A55X Builder"
 
     - name: Setup Workspace & Sync Official Sources
       run: |
@@ -32,13 +32,13 @@ jobs:
         cd workspace/src
         
         # Inicializamos el manifest OFICIAL de LineageOS 23.2
-        # Esto garantiza que tengamos todos los headers de frameworks/native, system/core, etc.
         repo init -u https://github.com/LineageOS/android.git \
                    -b lineage-23.2 \
                    --depth=1 \
                    --no-tags
 
-        # Sincronizamos SOLO lo necesario para compilar frameworks/av
+        # Sincronizamos SOLO lo necesario para frameworks/av
+        # Eliminamos vendor/lineage para evitar errores de envsetup si no se descarga bien
         repo sync -c -j8 --no-tags --no-clone-bundle \
           frameworks/av \
           frameworks/native \
@@ -63,7 +63,7 @@ jobs:
         cp $GITHUB_WORKSPACE/my_fork/media/libaudioclient/AudioSystem.cpp \
            workspace/src/frameworks/av/media/libaudioclient/AudioSystem.cpp
         
-        # Verificación crítica: ¿Está el parche ahí?
+        # Verificación crítica
         if grep -q "PATCH A55X FREE SAM" workspace/src/frameworks/av/media/libaudioclient/AudioSystem.cpp; then
             echo "✅ Parche aplicado correctamente."
         else
@@ -71,13 +71,20 @@ jobs:
             exit 1
         fi
 
-    - name: Configure Build Environment
+    - name: Configure Build Environment (AOSP Mode)
       run: |
         cd workspace/src
+        
+        # IMPORTANTE: Creamos un stub vacío para vendor/lineage/build/envsetup.sh
+        # Esto evita que source build/envsetup.sh falle al buscar archivos que no sincronizamos
+        mkdir -p vendor/lineage/build
+        touch vendor/lineage/build/envsetup.sh
+        
         source build/envsetup.sh
         
-        # Target genérico ARM64. libaudioclient.so es estándar para todos.
-        lunch lineage_aosp_arm64-userdebug
+        # Usamos un target genérico ARM64 de AOSP. 
+        # No usamos 'lineage_' prefix para evitar dependencias de device trees específicos.
+        lunch aosp_arm64-userdebug
         
         export ALLOW_MISSING_DEPENDENCIES=true
         export USE_CCACHE=1
@@ -86,11 +93,29 @@ jobs:
     - name: Compile Libaudioclient
       run: |
         cd workspace/src
+        
+        # Compilamos SOLO la librería afectada
         mka libaudioclient -j8
+
+    - name: Locate and Prepare Artifact
+      run: |
+        cd workspace/src
+        
+        # Buscar el archivo generado
+        LIB_PATH=$(find out/target/product/aosp_arm64/system/lib64 -name "libaudioclient.so")
+        
+        if [ -z "$LIB_PATH" ]; then
+            echo "❌ No se encontró libaudioclient.so"
+            ls -R out/target/product/aosp_arm64/system/lib64/ || true
+            exit 1
+        fi
+        
+        echo "📦 Archivo encontrado: $LIB_PATH"
+        cp "$LIB_PATH" /home/runner/workspace/libaudioclient_patched_A55X.so
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: libaudioclient_patched_A55X
-        path: workspace/src/out/target/product/aosp_arm64/system/lib64/libaudioclient.so
+        path: /home/runner/workspace/libaudioclient_patched_A55X.so
         retention-days: 7
