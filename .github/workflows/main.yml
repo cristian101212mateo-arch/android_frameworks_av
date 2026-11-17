@@ -1,0 +1,121 @@
+name: Build Patched Libaudioclient for A55X
+
+on:
+  push:
+    branches: [ lineage-23.2 ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    
+    steps:
+    - name: Checkout My Fork (Patched Source)
+      uses: actions/checkout@v4
+      with:
+        path: my_fork
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git python3 repo bc bison flex gperf zlib1g-dev \
+          libncurses5-dev libssl-dev lzop pngcrush schedtool squashfs-tools \
+          rsync unzip zip openjdk-17-jdk ccache
+        
+        git config --global user.email "ci@a55x.build"
+        git config --global user.name "A55X Builder"
+
+    - name: Setup Workspace & Sync Official Sources
+      run: |
+        mkdir -p workspace/src
+        cd workspace/src
+        
+        # Inicializamos el manifest OFICIAL de LineageOS 23.2
+        repo init -u https://github.com/LineageOS/android.git \
+                   -b lineage-23.2 \
+                   --depth=1 \
+                   --no-tags
+
+        # Sincronizamos SOLO lo necesario para frameworks/av
+        # Eliminamos vendor/lineage para evitar errores de envsetup si no se descarga bien
+        repo sync -c -j8 --no-tags --no-clone-bundle \
+          frameworks/av \
+          frameworks/native \
+          system/core \
+          build/make \
+          build/soong \
+          prebuilts/clang/host/linux-x86 \
+          prebuilts/build-tools \
+          prebuilts/jdk/jdk21 \
+          external/zlib \
+          external/libcxx \
+          external/icu \
+          hardware/interfaces \
+          system/security \
+          system/logging
+
+    - name: Apply My Patch to Official Sources
+      run: |
+        echo "--- Overwriting official AudioSystem.cpp with my patched version ---"
+        
+        # Copiamos MI archivo parcheado encima del oficial sincronizado
+        cp $GITHUB_WORKSPACE/my_fork/media/libaudioclient/AudioSystem.cpp \
+           workspace/src/frameworks/av/media/libaudioclient/AudioSystem.cpp
+        
+        # Verificación crítica
+        if grep -q "PATCH A55X FREE SAM" workspace/src/frameworks/av/media/libaudioclient/AudioSystem.cpp; then
+            echo "✅ Parche aplicado correctamente."
+        else
+            echo "❌ ERROR: El parche NO se encontró."
+            exit 1
+        fi
+
+    - name: Configure Build Environment (AOSP Mode)
+      run: |
+        cd workspace/src
+        
+        # IMPORTANTE: Creamos un stub vacío para vendor/lineage/build/envsetup.sh
+        # Esto evita que source build/envsetup.sh falle al buscar archivos que no sincronizamos
+        mkdir -p vendor/lineage/build
+        touch vendor/lineage/build/envsetup.sh
+        
+        source build/envsetup.sh
+        
+        # Usamos un target genérico ARM64 de AOSP. 
+        # No usamos 'lineage_' prefix para evitar dependencias de device trees específicos.
+        lunch aosp_arm64-userdebug
+        
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export USE_CCACHE=1
+        export CCACHE_DIR=/home/runner/.ccache
+
+    - name: Compile Libaudioclient
+      run: |
+        cd workspace/src
+        
+        # Compilamos SOLO la librería afectada
+        mka libaudioclient -j8
+
+    - name: Locate and Prepare Artifact
+      run: |
+        cd workspace/src
+        
+        # Buscar el archivo generado
+        LIB_PATH=$(find out/target/product/aosp_arm64/system/lib64 -name "libaudioclient.so")
+        
+        if [ -z "$LIB_PATH" ]; then
+            echo "❌ No se encontró libaudioclient.so"
+            ls -R out/target/product/aosp_arm64/system/lib64/ || true
+            exit 1
+        fi
+        
+        echo "📦 Archivo encontrado: $LIB_PATH"
+        cp "$LIB_PATH" /home/runner/workspace/libaudioclient_patched_A55X.so
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: libaudioclient_patched_A55X
+        path: /home/runner/workspace/libaudioclient_patched_A55X.so
+        retention-days: 7
